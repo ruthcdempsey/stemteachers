@@ -1,0 +1,7 @@
+stemteachers_custom.stemteachers_custom_submitted_form:
+  path: '/admin/structure/types/submitted'
+  defaults:
+    _form: 'Drupal\stemteachers_custom\Form\StemteachersCustomSubmittedForm'
+    _title: 'Submitted lines'
+  requirements:
+    _permission: 'administer content types'

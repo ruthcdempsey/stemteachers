@@ -1,0 +1,245 @@
+<?php
+
+/**
+ * @file
+ * Custom module to perform misc tasks.
+ */
+
+use Drupal\Core\Entity\Display\EntityViewDisplayInterface;
+use Drupal\Core\Entity\EntityInterface;
+use Drupal\user\Entity\User;
+use Drupal\Core\Form\FormStateInterface;
+use Drupal\Core\Url;
+use Drupal\node\Entity\NodeType;
+use Drupal\node\NodeInterface;
+
+/**
+ * Implements hook_entity_extra_field_info().
+ */
+function stemteachers_custom_entity_extra_field_info() {
+  // The return array.
+  $extra = [];
+
+  // Ensure we only operate on install entity types.
+  $entity_type_manager = \Drupal::service('entity_type.manager');
+  $entity_definitions = $entity_type_manager->getDefinitions();
+
+  // Go through all the node types and add extra fields for display.
+  if (isset($entity_definitions['node'])) {
+    foreach (NodeType::loadMultiple() as $bundle) {
+      $extra['node'][$bundle->Id()] = [
+        'display' => [
+          'stemteachers_custom_submitted' => [
+            'label' => t('Submitted'),
+            'description' => t('Author attribution for the content.'),
+            'weight' => 0,
+          ],
+        ],
+      ];
+    }
+  }
+
+  return $extra;
+}
+
+/**
+ * Implements hook_entity_type_alter().
+ *
+ * Alters the entity definition and adds our own form handlers.
+ */
+function stemteachers_custom_entity_type_alter(array &$entity_types) {
+  $form_modes = \Drupal::service('entity_display.repository')
+    ->getAllFormModes();
+
+  foreach ($form_modes as $entity_type => $display_modes) {
+    if ($entity_type !== 'node') {
+      continue;
+    }
+
+    $type = $entity_types[$entity_type];
+    foreach ($display_modes as $machine_name => $form_display) {
+      if (isset($type->getHandlerClasses()['form']['default'])) {
+        $default_handler_class = $type->getHandlerClasses()['form']['default'];
+        $type->setFormClass($machine_name, $default_handler_class);
+      }
+    }
+  }
+}
+
+/**
+ * Implements hook_form_alter().
+ */
+function stemteachers_custom_form_alter(&$form, FormStateInterface $form_state, $form_id) {
+  // Add the SEO fields to the advanced fieldset.
+  if (isset($form['advanced']) && isset($form['field_seo'])) {
+    $form['field_seo']['#group'] = 'advanced';
+  }
+
+  // Tweak the 'brief' node form mode.
+  if (in_array($form_id, [
+    'node_lesson_plan_brief_form',
+    'node_event_brief_form',
+  ])) {
+    // Add a class in common so we can style these forms in common.
+    $form['#attributes']['class'][] = 'form-mode--brief';
+
+    // Hide or modify fields we don't want to see.
+    hide($form['advanced']);
+
+    // Only make the person fields required for the brief form mode.
+    if (isset($form['field_email']['widget'][0]['value']['#required'])) {
+      $form['field_email']['widget'][0]['value']['#required'] = TRUE;
+    }
+    if (isset($form['field_first_name']['widget'][0]['value']['#required'])) {
+      $form['field_first_name']['widget'][0]['value']['#required'] = TRUE;
+    }
+    if (isset($form['field_last_name']['widget'][0]['value']['#required'])) {
+      $form['field_last_name']['widget'][0]['value']['#required'] = TRUE;
+    }
+
+    // Set a redirect handler on submit.
+    $form['actions']['submit']['#submit'][] = '_stemteachers_custom_node_form_brief_submit';
+  }
+}
+
+/**
+ * Implements hook_node_links_alter().
+ */
+function stemteachers_custom_node_links_alter(array &$links, NodeInterface $entity, array &$context) {
+  $node_title_stripped = strip_tags($entity->label());
+  $read_more = 'Read more';
+
+  // Attributes for the links' container.
+  $links['#attributes']['class'][] = 'card-buttons';
+  $links['#attributes']['class'][] = 'list-style--none';
+
+  // Show node links as buttons, except on certain types.
+  $readmore_classes = [
+    'btn',
+    'btn-maroon',
+  ];
+  if ($entity->bundle() === 'event') {
+    $readmore_classes = [];
+    if (isset($context['view_mode']) && $context['view_mode'] === 'feature') {
+      $read_more = 'Learn More';
+      $readmore_classes = [
+        'btn',
+        'btn-gold',
+      ];
+    }
+  }
+
+  // Theme out the readmore link specifically.
+  $links['node']['#links']['node-readmore'] = [
+    'title' => t($read_more . '<span class="visually-hidden"> about @title</span>', [
+      '@title' => $node_title_stripped,
+    ]),
+    'url' => $entity->toUrl(),
+    'language' => $entity->language(),
+    'attributes' => [
+      'rel' => 'tag',
+      'title' => $node_title_stripped,
+      'class' => $readmore_classes,
+    ],
+  ];
+}
+
+/**
+ * Implements hook_node_presave().
+ */
+function stemteachers_custom_node_presave(\Drupal\Core\Entity\EntityInterface $node) {
+  // If node is submitted by the anonymous user
+  $uid = $node->getOwnerId();
+  if (isset($uid) && $uid == 0) {
+    // If the email field (and name fields, etc.) has a value
+    $email = $node->get('field_email')->value;
+    $first_name = $node->get('field_first_name')->value;
+    $last_name = $node->get('field_last_name')->value;
+    if (isset($email)) {
+      // Default the owner to the admin user, though this is always overridden.
+      $author_uid = 1;
+
+      // See if there's an existing user with that email (probably not).
+      $uids = \Drupal::entityQuery('user')
+        ->condition('mail', $email)
+        ->execute();
+      if (isset($uids) && count($uids)) {
+        $author_uid = array_shift($uids);
+      }
+      else {
+        // If the user does not exist, create them.
+        $user = User::create();
+
+        //Mandatory settings
+        $user->setUsername($email);
+        $user->setPassword(md5($email) . 'Stand-in for a hash salt.');
+        $user->enforceIsNew();
+        $user->setEmail($email);
+
+        // The two optional fields.
+        if (isset($first_name) && mb_strlen($first_name)) {
+          $user->set('field_name_first', $first_name);
+        }
+
+        if (isset($last_name) && mb_strlen($last_name)) {
+          $user->set('field_name_last', $last_name);
+        }
+
+        // Save user account.
+        // $user->activate(); // Uncomment for active user instead of blocked.
+        $user->save();
+        $author_uid = $user->get('uid')->value;
+      }
+
+      // Set the node author to the new/existing user.
+      $node->setOwnerId($author_uid);
+    }
+  }
+}
+
+/**
+ * Implements hook_ENTITY_TYPE_view().
+ */
+function stemteachers_custom_node_view(array &$build, EntityInterface $entity, EntityViewDisplayInterface $display, $view_mode) {
+  // Submitted line.
+  if ($display->getComponent('stemteachers_custom_submitted')) {
+    $sub = \Drupal::config('stemteachers_custom.stemteachers_custom_submitted');
+    $sub_line = 'Submitted by [node:author:name] on [node:created]';
+    if ($sub->get($entity->bundle())) {
+      $sub_line = $sub->get($entity->bundle());
+    }
+    $build['stemteachers_custom_submitted'] = [
+      '#prefix' => '<div class="submitted">',
+      '#markup' => \Drupal::token()
+        ->replace($sub_line, ['node' => $entity]),
+      '#suffix' => '</div>',
+    ];
+  }
+}
+
+/**
+ * Implements hook_page_attachments().
+ */
+function stemteachers_custom_page_attachments(array &$attachments) {
+  // Add an apple-touch-icon if there's one in the site root.
+  if (file_exists(DRUPAL_ROOT . '/apple-touch-icon.png')) {
+    $attachments['#attached']['html_head_link'][][] = [
+      'rel' => 'apple-touch-icon',
+      'href' => '/apple-touch-icon.png',
+    ];
+  }
+}
+
+/**
+ * Helper function to handle redirection.
+ */
+function _stemteachers_custom_node_form_brief_submit($form, &$form_state) {
+  // Don't override the default redirection scheme.
+  $request = Drupal::request();
+  if (!$request->query->has('destination')) {
+    // Beware! These are hard-code nids for site content thank-you pages.
+    $redirect_nid = (isset($form['#form_id']) && $form['#form_id'] === 'node_event_brief_form') ? 39 : 26;
+    $url = Url::fromRoute('entity.node.canonical', ['node' => $redirect_nid]);
+    $request->query->set('destination', $url->toString());
+  }
+}

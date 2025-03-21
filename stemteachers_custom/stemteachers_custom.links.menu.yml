@@ -1,0 +1,5 @@
+stemteachers_custom.stemteachers_custom_submitted:
+  title: 'Submitted lines'
+  parent: entity.node_type.collection
+  route_name: stemteachers_custom.stemteachers_custom_submitted_form
+  weight: 10
